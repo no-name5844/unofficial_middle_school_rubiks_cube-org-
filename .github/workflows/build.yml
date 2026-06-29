@@ -1,0 +1,50 @@
+name: 自动构建数据库和PDF
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf2.0-0 libffi-dev libcairo2
+          pip install markdown weasyprint
+
+      - name: 从MD重建数据库
+        run: python3 rebuild_db.py
+
+      - name: 生成PDF
+        run: |
+          python3 -c "
+          import markdown
+          from weasyprint import HTML
+          css='<style>body{font-family:SimSun,serif;font-size:14px;line-height:1.8;max-width:750px;margin:40px auto;padding:20px;color:#222}h1{text-align:center;font-size:22px}h2{font-size:18px;margin-top:28px;padding-bottom:6px;border-bottom:2px solid #333}@page{margin:20mm 18mm;size:A4}</style>'
+          import os
+          for f in os.listdir('.'):
+              if f.endswith('.md') and '临时' in f:
+                  with open(f) as fp: c=fp.read()
+                  h=f'<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8>{css}</head><body>{markdown.markdown(c,extensions=[\"tables\"])}</body></html>'
+                  HTML(string=h).write_pdf(f.replace('.md','.pdf'))
+                  print(f'✅ {f} -> PDF')
+          "
+
+      - name: 提交构建结果
+        run: |
+          git config user.name "build-bot"
+          git config user.email "bot@xssz.org"
+          git add charter.db *.pdf
+          git diff --staged --quiet || git commit -m "自动构建: 更新数据库和PDF"
+          git push
