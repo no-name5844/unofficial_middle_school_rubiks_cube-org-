@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""重建 charter.db 从所有 MD 文件"""
+"""重建 charter.db 从所有 MD 文件，捕获完整多行条款内容"""
 import sqlite3, re
 
 db = sqlite3.connect('charter.db')
@@ -31,19 +31,37 @@ files = [
     ('经费管理委员会临时细则.md', '细则'),
 ]
 
+ARTICLE_RE = re.compile(r'\*\*第([一二三四五六七八九十百零]+)条\*\*\s*(.*)')
+
 for fname, src in files:
     with open(fname, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+        text = f.read()
+
     ch = "前言"
-    for line in lines:
-        if line.startswith('## '):
-            ch = line.strip()[3:]
-        m = re.match(r'\*\*第([一二三四五六七八九十百零]+)条\*\*\s*(.*)', line)
+    # Split by article headers to capture multi-line content
+    parts = re.split(r'(\*\*第[一二三四五六七八九十百零]+条\*\*)', text)
+
+    current_cn = None
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        m = re.match(r'\*\*第([一二三四五六七八九十百零]+)条\*\*', part)
         if m:
-            cn = m.group(1)
-            txt = m.group(2).strip()[:200]
-            db.execute('INSERT INTO articles VALUES (NULL,?,?,?,?,?)',
-                      (src, ch, cn2n(cn), f'第{cn}条', txt))
+            current_cn = m.group(1)
+            # The next part is the content
+            if i + 1 < len(parts):
+                content = parts[i + 1]
+                # Stop at the next '## ' or '---' or next article
+                content = re.split(r'\n(?=## |---|\*\*第)', content)[0].strip()
+                db.execute('INSERT INTO articles VALUES (NULL,?,?,?,?,?)',
+                          (src, ch, cn2n(current_cn), f'第{current_cn}条', content))
+            i += 2
+        else:
+            # Check for chapter header
+            for line in part.split('\n'):
+                if line.startswith('## '):
+                    ch = line.strip()[3:]
+            i += 1
 
 db.commit()
 for src in ['章程','细则']:
