@@ -18,7 +18,12 @@ import sys
 import os
 import re
 
-DB_PATH = 'charter.db'
+# 自动定位 charter.db：先查当前目录，再查脚本所在目录的上一级（仓库根）
+DB_PATH = next(
+    (p for p in ['charter.db', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'charter.db')]
+     if os.path.exists(p)),
+    'charter.db',
+)
 
 # 中文数字 -> int
 _CN = {'零': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5,

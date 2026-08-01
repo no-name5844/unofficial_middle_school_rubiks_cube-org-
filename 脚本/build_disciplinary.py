@@ -9,9 +9,14 @@
   python3 build_disciplinary.py --update 5 '{"severity":"重度",...}'
 """
 
-import sqlite3, json, sys
+import sqlite3, json, sys, os
 
-DB_PATH = 'charter.db'
+# 自动定位 charter.db：先查当前目录，再查脚本所在目录的上一级（仓库根）
+DB_PATH = next(
+    (p for p in ['charter.db', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'charter.db')]
+     if os.path.exists(p)),
+    'charter.db',
+)
 
 # ═══════════════════════════════════════════════
 #  建表（仅首次执行，不丢数据）

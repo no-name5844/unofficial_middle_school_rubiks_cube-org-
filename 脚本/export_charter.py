@@ -18,7 +18,12 @@
 import sqlite3, sys, os
 from datetime import datetime
 
-DB_PATH = 'charter.db'
+# 自动定位 charter.db：先查当前目录，再查脚本所在目录的上一级（仓库根）
+DB_PATH = next(
+    (p for p in ['charter.db', os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'charter.db')]
+     if os.path.exists(p)),
+    'charter.db',
+)
 
 def build_markdown_by_file(db: sqlite3.Connection, file_name: str, source: str) -> str:
     """按单个文件名导出"""
