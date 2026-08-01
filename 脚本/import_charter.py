@@ -56,23 +56,27 @@ def cn_to_int(s: str) -> int:
             raise ValueError(f'无法解析的数字：{ch}（来自 {s}）')
     return total + section
 
-ART_RE = re.compile(r'^\*\*(第[一二三四五六七八九十百零\d]+条)\*\*')
+# 条文标题支持两种写法：旧式 **第X条** 与 带内容哈希的新式 **第X条#hash**
+ART_RE = re.compile(r'^\*\*(第[一二三四五六七八九十百零\d]+条)(?:#([0-9a-f]{8}))?\*\*')
 CHAP_RE = re.compile(r'^##\s+(.+?)\s*$')
 
 
 def parse_file(path: str):
-    """返回 [(chapter, article_num, article_cn, content), ...]"""
+    """返回 [(chapter, article_num, article_cn, hash_val, content), ...]
+
+    hash_val 为条文内容哈希（8 位十六进制），无哈希时为 None。
+    """
     with open(path, 'r', encoding='utf-8') as f:
         lines = f.read().split('\n')
 
     chapter = ''
     results = []
-    buf = None  # 当前正在累积的 (cn, num, content_lines)
+    buf = None  # 当前正在累积的 (cn, num, hash_val, content_lines)
 
     def flush():
         nonlocal buf
         if buf is not None:
-            cn, num, clines = buf
+            cn, num, hv, clines = buf
             # 去掉末尾的空行与章节分隔符（---），它们不是条文内容
             while clines and clines[-1].strip() in ('', '---'):
                 clines.pop()
@@ -80,7 +84,7 @@ def parse_file(path: str):
             while clines and clines[0].strip() == '':
                 clines.pop(0)
             content = '\n'.join(clines)
-            results.append((chapter, num, cn, content))
+            results.append((chapter, num, cn, hv, content))
             buf = None
 
     for line in lines:
@@ -93,42 +97,52 @@ def parse_file(path: str):
         if m_art:
             flush()
             cn = m_art.group(1)            # 第四十七条
+            hv = m_art.group(2)            # 8 位十六进制哈希，可能为 None
             num = cn_to_int(re.search(r'第(.+)条', cn).group(1))
             rest = line[m_art.end():].strip()
-            buf = (cn, num, [rest] if rest else [])
+            buf = (cn, num, hv, [rest] if rest else [])
             continue
         if buf is not None:
-            buf[2].append(line)
+            buf[3].append(line)
     flush()
     return results
+
+
+def ensure_schema(db: sqlite3.Connection):
+    """确保 articles 表含 hash 列（内容哈希，8 位十六进制）。幂等。"""
+    cur = db.cursor()
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(articles)").fetchall()}
+    if 'hash' not in cols:
+        cur.execute("ALTER TABLE articles ADD COLUMN hash TEXT")
+        db.commit()
 
 
 def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, version: str, dry_run: bool):
     cur = db.cursor()
     stats = {'insert': 0, 'update': 0, 'unchanged': 0}
-    for chapter, num, cn, content in rows:
+    for chapter, num, cn, hv, content in rows:
         existing = cur.execute(
-            "SELECT id, chapter, content FROM articles WHERE source=? AND article_num=? AND file_name=? AND version=?",
+            "SELECT id, chapter, content, hash FROM articles WHERE source=? AND article_num=? AND file_name=? AND version=?",
             (source, num, file_name, version)
         ).fetchone()
         if existing is None:
             if not dry_run:
                 cur.execute(
-                    "INSERT INTO articles (source, chapter, article_num, article_cn, content, file_name, version) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (source, chapter, num, cn, content, file_name, version)
+                    "INSERT INTO articles (source, chapter, article_num, article_cn, content, hash, file_name, version) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (source, chapter, num, cn, content, hv, file_name, version)
                 )
             stats['insert'] += 1
             print(f"  [{'DRY' if dry_run else '新增'}] {cn} (chapter={chapter}) [version={version}]")
         else:
-            eid, echap, econtent = existing
-            if econtent == content and echap == chapter:
+            eid, echap, econtent, ehash = existing
+            if econtent == content and echap == chapter and ehash == hv:
                 stats['unchanged'] += 1
             else:
                 if not dry_run:
                     cur.execute(
-                        "UPDATE articles SET chapter=?, content=? WHERE id=?",
-                        (chapter, content, eid)
+                        "UPDATE articles SET chapter=?, content=?, hash=? WHERE id=?",
+                        (chapter, content, hv, eid)
                     )
                 stats['update'] += 1
                 changed = []
@@ -136,6 +150,8 @@ def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, version: s
                     changed.append(f'chapter: {echap!r} -> {chapter!r}')
                 if econtent != content:
                     changed.append('content: 已更新')
+                if ehash != hv:
+                    changed.append('hash: 已补/更新')
                 print(f"  [{'DRY' if dry_run else '更新'}] {cn} ({'; '.join(changed)}) [version={version}]")
     if not dry_run:
         db.commit()
@@ -149,7 +165,7 @@ def prune_db(db: sqlite3.Connection, rows, source: str, file_name: str, version:
     必须在 UPSERT 之前清掉。非破坏性导入的「保留未出现旧条文」原则，在显式 --prune
     时让位于「与源文件严格一致」原则。version 限定只清理当前导入的那个版本。
     """
-    keep = {num for _, num, _, _ in rows}
+    keep = {num for _, num, _, _, _ in rows}
     cur = db.cursor()
     orphan = cur.execute(
         "SELECT id, article_num, article_cn FROM articles WHERE source=? AND file_name=? AND version=?",
@@ -204,6 +220,7 @@ def main():
     print(f'📄 解析 {file_name}（source={source}, version={version}）：共 {len(rows)} 条')
 
     db = sqlite3.connect(DB_PATH)
+    ensure_schema(db)
     if prune:
         n = prune_db(db, rows, source, file_name, version, dry_run)
         print(f'🧹 prune：移除 {n} 条孤儿行')
