@@ -171,7 +171,7 @@ def main():
     args = sys.argv[1:]
     dry_run = '--dry-run' in args
     prune = '--prune' in args
-    version = '严谨'
+    version = None  # 默认按文件名后缀自动判定
     if '--version' in args:
         i = args.index('--version')
         version = args[i + 1]
@@ -192,6 +192,13 @@ def main():
     file_name = os.path.basename(path)
     if source is None:
         source = '细则' if '细则' in file_name else '章程'
+    if version is None:  # 文件名含“通俗版/严谨版”后缀时自动判定版本
+        if '通俗' in file_name:
+            version = '通俗'
+        elif '严谨' in file_name:
+            version = '严谨'
+        else:
+            version = '严谨'
 
     rows = parse_file(path)
     print(f'📄 解析 {file_name}（source={source}, version={version}）：共 {len(rows)} 条')
