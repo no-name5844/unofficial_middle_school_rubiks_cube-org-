@@ -9,8 +9,10 @@
 用法：
   python3 import_charter.py xssz魔方非官方组织临时章程.md
   python3 import_charter.py 运营委员会临时细则.md --source 细则
+  python3 import_charter.py 运营委员会临时细则.md --version 通俗
   python3 import_charter.py xssz魔方非官方组织临时章程.md --dry-run
-  python3 import_charter.py xssz魔方非官方组织临时章程.md --force-insert   # 无冲突时也确保存在
+  python3 import_charter.py xssz魔方非官方组织临时章程.md --prune   # 清理该版本孤儿行
+  说明：source 默认按文件名自动判定（含“细则”即细则，否则章程）；version 默认“严谨”。
 """
 
 import sqlite3
@@ -101,23 +103,23 @@ def parse_file(path: str):
     return results
 
 
-def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, dry_run: bool):
+def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, version: str, dry_run: bool):
     cur = db.cursor()
     stats = {'insert': 0, 'update': 0, 'unchanged': 0}
     for chapter, num, cn, content in rows:
         existing = cur.execute(
-            "SELECT id, chapter, content FROM articles WHERE source=? AND article_num=? AND file_name=?",
-            (source, num, file_name)
+            "SELECT id, chapter, content FROM articles WHERE source=? AND article_num=? AND file_name=? AND version=?",
+            (source, num, file_name, version)
         ).fetchone()
         if existing is None:
             if not dry_run:
                 cur.execute(
-                    "INSERT INTO articles (source, chapter, article_num, article_cn, content, file_name) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (source, chapter, num, cn, content, file_name)
+                    "INSERT INTO articles (source, chapter, article_num, article_cn, content, file_name, version) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (source, chapter, num, cn, content, file_name, version)
                 )
             stats['insert'] += 1
-            print(f"  [{'DRY' if dry_run else '新增'}] {cn} (chapter={chapter})")
+            print(f"  [{'DRY' if dry_run else '新增'}] {cn} (chapter={chapter}) [version={version}]")
         else:
             eid, echap, econtent = existing
             if econtent == content and echap == chapter:
@@ -134,30 +136,30 @@ def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, dry_run: b
                     changed.append(f'chapter: {echap!r} -> {chapter!r}')
                 if econtent != content:
                     changed.append('content: 已更新')
-                print(f"  [{'DRY' if dry_run else '更新'}] {cn} ({'; '.join(changed)})")
+                print(f"  [{'DRY' if dry_run else '更新'}] {cn} ({'; '.join(changed)}) [version={version}]")
     if not dry_run:
         db.commit()
     return stats
 
 
-def prune_db(db: sqlite3.Connection, rows, source: str, file_name: str, dry_run: bool) -> int:
-    """删除该 (source, file_name) 下、文件中已不再出现的旧编号行。
+def prune_db(db: sqlite3.Connection, rows, source: str, file_name: str, version: str, dry_run: bool) -> int:
+    """删除该 (source, file_name, version) 下、文件中已不再出现的旧编号行。
 
     重排编号（如 101→100）后，旧编号行会变成孤儿行（与重排后的新行撞 UNIQUE 键），
     必须在 UPSERT 之前清掉。非破坏性导入的「保留未出现旧条文」原则，在显式 --prune
-    时让位于「与源文件严格一致」原则。
+    时让位于「与源文件严格一致」原则。version 限定只清理当前导入的那个版本。
     """
     keep = {num for _, num, _, _ in rows}
     cur = db.cursor()
     orphan = cur.execute(
-        "SELECT id, article_num, article_cn FROM articles WHERE source=? AND file_name=?",
-        (source, file_name)
+        "SELECT id, article_num, article_cn FROM articles WHERE source=? AND file_name=? AND version=?",
+        (source, file_name, version)
     ).fetchall()
     removed = 0
     for eid, num, cn in orphan:
         if num not in keep:
             removed += 1
-            print(f"  [{'DRY' if dry_run else '删除'}] {cn} (article_num={num}) — 源文件已无此编号")
+            print(f"  [{'DRY' if dry_run else '删除'}] {cn} (article_num={num}) [version={version}] — 源文件已无此编号")
             if not dry_run:
                 cur.execute("DELETE FROM articles WHERE id=?", (eid,))
     if removed and not dry_run:
@@ -169,29 +171,36 @@ def main():
     args = sys.argv[1:]
     dry_run = '--dry-run' in args
     prune = '--prune' in args
-    args = [a for a in args if a not in ('--dry-run', '--prune')]
-    source = '章程'
+    version = '严谨'
+    if '--version' in args:
+        i = args.index('--version')
+        version = args[i + 1]
+        args = args[:i] + args[i + 2:]
+    args = [a for a in args if a not in ('--dry-run', '--prune', '--version')]
+    source = None  # 默认按文件名自动判定
     if '--source' in args:
         i = args.index('--source')
         source = args[i + 1]
         args = args[:i] + args[i + 2:]
     if not args:
-        print('用法: python3 import_charter.py <markdown文件> [--source 章程|细则] [--dry-run] [--prune]')
+        print('用法: python3 import_charter.py <markdown文件> [--source 章程|细则] [--version 严谨|通俗] [--dry-run] [--prune]')
         sys.exit(1)
     path = args[0]
     if not os.path.exists(path):
         print(f'❌ 文件不存在：{path}')
         sys.exit(1)
     file_name = os.path.basename(path)
+    if source is None:
+        source = '细则' if '细则' in file_name else '章程'
 
     rows = parse_file(path)
-    print(f'📄 解析 {file_name}（source={source}）：共 {len(rows)} 条')
+    print(f'📄 解析 {file_name}（source={source}, version={version}）：共 {len(rows)} 条')
 
     db = sqlite3.connect(DB_PATH)
     if prune:
-        n = prune_db(db, rows, source, file_name, dry_run)
+        n = prune_db(db, rows, source, file_name, version, dry_run)
         print(f'🧹 prune：移除 {n} 条孤儿行')
-    stats = upsert(db, rows, source, file_name, dry_run)
+    stats = upsert(db, rows, source, file_name, version, dry_run)
     db.close()
     print(f'✅ 完成：新增 {stats["insert"]} / 更新 {stats["update"]} / 未变 {stats["unchanged"]}')
 
