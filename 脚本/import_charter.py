@@ -140,17 +140,43 @@ def upsert(db: sqlite3.Connection, rows, source: str, file_name: str, dry_run: b
     return stats
 
 
+def prune_db(db: sqlite3.Connection, rows, source: str, file_name: str, dry_run: bool) -> int:
+    """删除该 (source, file_name) 下、文件中已不再出现的旧编号行。
+
+    重排编号（如 101→100）后，旧编号行会变成孤儿行（与重排后的新行撞 UNIQUE 键），
+    必须在 UPSERT 之前清掉。非破坏性导入的「保留未出现旧条文」原则，在显式 --prune
+    时让位于「与源文件严格一致」原则。
+    """
+    keep = {num for _, num, _, _ in rows}
+    cur = db.cursor()
+    orphan = cur.execute(
+        "SELECT id, article_num, article_cn FROM articles WHERE source=? AND file_name=?",
+        (source, file_name)
+    ).fetchall()
+    removed = 0
+    for eid, num, cn in orphan:
+        if num not in keep:
+            removed += 1
+            print(f"  [{'DRY' if dry_run else '删除'}] {cn} (article_num={num}) — 源文件已无此编号")
+            if not dry_run:
+                cur.execute("DELETE FROM articles WHERE id=?", (eid,))
+    if removed and not dry_run:
+        db.commit()
+    return removed
+
+
 def main():
     args = sys.argv[1:]
     dry_run = '--dry-run' in args
-    args = [a for a in args if a != '--dry-run']
+    prune = '--prune' in args
+    args = [a for a in args if a not in ('--dry-run', '--prune')]
     source = '章程'
     if '--source' in args:
         i = args.index('--source')
         source = args[i + 1]
         args = args[:i] + args[i + 2:]
     if not args:
-        print('用法: python3 import_charter.py <markdown文件> [--source 章程|细则] [--dry-run]')
+        print('用法: python3 import_charter.py <markdown文件> [--source 章程|细则] [--dry-run] [--prune]')
         sys.exit(1)
     path = args[0]
     if not os.path.exists(path):
@@ -162,6 +188,9 @@ def main():
     print(f'📄 解析 {file_name}（source={source}）：共 {len(rows)} 条')
 
     db = sqlite3.connect(DB_PATH)
+    if prune:
+        n = prune_db(db, rows, source, file_name, dry_run)
+        print(f'🧹 prune：移除 {n} 条孤儿行')
     stats = upsert(db, rows, source, file_name, dry_run)
     db.close()
     print(f'✅ 完成：新增 {stats["insert"]} / 更新 {stats["update"]} / 未变 {stats["unchanged"]}')
