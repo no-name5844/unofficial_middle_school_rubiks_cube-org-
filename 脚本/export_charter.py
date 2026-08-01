@@ -36,12 +36,14 @@ def build_markdown_by_file(db: sqlite3.Connection, file_name: str, source: str) 
     lines = [f'# {file_name}\n']
     for (ch,) in chs:
         arts = db.execute(
-            "SELECT article_cn, content FROM articles WHERE source=? AND file_name=? AND chapter=? ORDER BY article_num",
+            "SELECT article_cn, content, hash FROM articles WHERE source=? AND file_name=? AND chapter=? ORDER BY article_num",
             (source, file_name, ch)
         ).fetchall()
         lines.append(f'\n## {ch}\n')
-        for cn, txt in arts:
-            lines.append(f'**{cn}** {txt}\n')
+        for cn, txt, hv in arts:
+            # 有哈希则输出 **第X条#hash**，否则回退旧式 **第X条**
+            title = f'**{cn}#{hv}**' if hv else f'**{cn}**'
+            lines.append(f'{title} {txt}\n')
         lines.append('\n---')
     return '\n'.join(lines)
 
@@ -71,7 +73,9 @@ def export(source: str, outfile=None, force: bool = False):
     ).fetchone()[0] > 0
 
     if is_file:
-        result = build_markdown_by_file(db, source, '细则' if source.endswith('.md') else '章程')
+        # 由文件名判定来源：含「细则」即为细则，否则为章程（不可仅按 .md 后缀判断）
+        src = '细则' if '细则' in source else '章程'
+        result = build_markdown_by_file(db, source, src)
     else:
         result = build_markdown_merged(db, source)
 
